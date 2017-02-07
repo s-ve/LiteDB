@@ -4,9 +4,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
+using System.Threading;
 
 namespace LiteDB
 {
+
     #region Delegates
 
     internal delegate object CreateObject();
@@ -23,6 +25,7 @@ namespace LiteDB
     internal partial class Reflection
     {
         private static Dictionary<Type, CreateObject> _cacheCtor = new Dictionary<Type, CreateObject>();
+        private static ReaderWriterLockSlim _lock = new ReaderWriterLockSlim();
 
         #region CreateInstance
 
@@ -31,9 +34,12 @@ namespace LiteDB
         /// </summary>
         public static object CreateInstance(Type type)
         {
+            _lock.EnterReadLock();
+
             try
             {
-                CreateObject c;
+                CreateObject c;                
+
                 if (_cacheCtor.TryGetValue(type, out c))
                 {
                     return c();
@@ -43,57 +49,65 @@ namespace LiteDB
             {
                 throw LiteException.InvalidCtor(type, ex);
             }
-
-            lock (_cacheCtor)
+            finally
             {
-                try
-                {
-                    CreateObject c = null;
-
-                    if (type.GetTypeInfo().IsClass)
-                    {
-                        _cacheCtor.Add(type, c = CreateClass(type));
-                    }
-                    else if (type.GetTypeInfo().IsInterface) // some know interfaces
-                    {
-                        if(type.GetTypeInfo().IsGenericType)
-                        {
-                            var typeDef = type.GetGenericTypeDefinition();
-
-                            if (typeDef == typeof(IList<>) || 
-                                typeDef == typeof(ICollection<>) ||
-                                typeDef == typeof(IEnumerable<>))
-                            {
-                                return CreateInstance(GetGenericListOfType(UnderlyingTypeOf(type)));
-                            }
-                            else if (typeDef == typeof(IDictionary<,>))
-                            {
-#if NET35
-                                var k = type.GetGenericArguments()[0];
-                                var v = type.GetGenericArguments()[1];
-#else
-                                var k = type.GetTypeInfo().GenericTypeArguments[0];
-                                var v = type.GetTypeInfo().GenericTypeArguments[1];
-#endif
-                                return CreateInstance(GetGenericDictionaryOfType(k, v));
-                            }
-                        }
-
-                        throw LiteException.InvalidCtor(type, null);
-                    }
-                    else // structs
-                    {
-                        _cacheCtor.Add(type, c = CreateStruct(type));
-                    }
-
-                    return c();
-                }
-                catch (Exception ex)
-                {
-                    throw LiteException.InvalidCtor(type, ex);
-                }
+                _lock.ExitReadLock();
             }
-        }
+
+            _lock.EnterWriteLock();
+
+            try
+            {
+                CreateObject c = null;
+
+                if (type.GetTypeInfo().IsClass)
+                {
+                    _cacheCtor.Add(type, c = CreateClass(type));
+                }
+                else if (type.GetTypeInfo().IsInterface) // some know interfaces
+                {
+                    if (type.GetTypeInfo().IsGenericType)
+                    {
+                        var typeDef = type.GetGenericTypeDefinition();
+
+                        if (typeDef == typeof(IList<>) ||
+                            typeDef == typeof(ICollection<>) ||
+                            typeDef == typeof(IEnumerable<>))
+                        {
+                            return CreateInstance(GetGenericListOfType(UnderlyingTypeOf(type)));
+                        }
+                        else if (typeDef == typeof(IDictionary<,>))
+                        {
+#if NET35
+                            var k = type.GetGenericArguments()[0];
+                            var v = type.GetGenericArguments()[1];
+#else
+                            var k = type.GetTypeInfo().GenericTypeArguments[0];
+                            var v = type.GetTypeInfo().GenericTypeArguments[1];
+#endif
+                            return CreateInstance(GetGenericDictionaryOfType(k, v));
+                        }
+                    }
+
+                    throw LiteException.InvalidCtor(type, null);
+                }
+                else // structs
+                {
+                    _cacheCtor.Add(type, c = CreateStruct(type));
+                }
+
+                return c();
+            }
+            catch (Exception ex)
+            {
+                throw LiteException.InvalidCtor(type, ex);
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+
+        }    
 
         #endregion
 
